@@ -1,5 +1,6 @@
 #include <stdarg.h>
 #include <float.h>
+#include <limits.h>
 #include "main.h"
 #include "usbd_cdc_vcp.h"
 #include "usbd_usr.h"
@@ -14,6 +15,8 @@ volatile uint8_t usb_suspended;
 volatile uint32_t ticker, downTicker;
 
 struct CODEC2 *c2;
+unsigned nsamp; // 160 or 320, avoiding 450pwb for now
+unsigned nsamp_x2;  // 320 or 640, avoiding 450pwb for now
 
 /*
  * The USB data must be 4 byte aligned if DMA is enabled. This macro handles
@@ -92,6 +95,10 @@ void init()
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_25MHz;
     GPIO_Init(GPIOC, &GPIO_InitStructure);
 
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOE, ENABLE);
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_7;  // codec timing pins
+    GPIO_Init(GPIOE, &GPIO_InitStructure);
+
     RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
     GPIO_InitStructure.GPIO_Pin = GPIO_Pin_3 | GPIO_Pin_2;  // microphone debug pins
     GPIO_Init(GPIOA, &GPIO_InitStructure);
@@ -119,24 +126,6 @@ volatile uint8_t vol;
 /*void set_test_pattern()
 {
     unsigned n, i;
-    for (n = 0; n < AUDIO_BUFFER_SIZE; n++) {
-        audio_buffer[n] = 0;
-    }
-
-    n = (AUDIO_BUFFER_SIZE / 2) - 1;
-    for (i = 0; i < 32; i++) {
-        audio_buffer[n--] = -8192;
-    }
-
-    n = AUDIO_BUFFER_SIZE - 1;
-    for (i = 0; i < 32; i++) {
-        audio_buffer[n--] = 8192;
-    }
-}*/
-
-void set_test_pattern()
-{
-    unsigned n, i;
     for (n = 0; n < SPKR_BUFFER_SIZE; n++) {
         spkr_buffer[n] = 0;
     }
@@ -150,10 +139,9 @@ void set_test_pattern()
     for (i = 0; i < 32; i++) {
         spkr_buffer[n--] = 8192;
     }
-}
+}*/
 
 uint8_t encode_once = 0;
-uint8_t encoded[128];
 /**
   * @brief  Main program.
   * @param  None
@@ -161,26 +149,48 @@ uint8_t encoded[128];
 */
 int main(void)
 { 
-	short decoded[160];
-	uint8_t decoded_ready = 0;
-    //unsigned foo = 0;
+    uint8_t encoded_[FRAME_LATENCY][8];
+	short decoded[640];
+    uint8_t encoded_rdy = 0;
+    unsigned efidx = 0;
+	//uint8_t decoded_ready = 0;
   	/* Set up the system clocks */
 	SystemInit();
 
 	/* Initialize USB, IO, SysTick, and all those other things you do in the morning */
 	init();
 
-    set_test_pattern();
-
-    _microphone_init();
-    _speaker_init();
+    //set_test_pattern();
 
     _waveType = 3;  // 3: microphone audio
 
-    micGain = 5.5;
+    micGain = 2.5;
 
-	// Codec2 Mode 3200 encodes 160 shorts into 64 bits (8 bytes)
-	c2 = codec2_create(CODEC2_MODE_3200);
+	c2 = codec2_create(CODEC2_MODE);
+    if (c2 == NULL) {
+        ColorfulRingOfDeath();
+    }
+    nsamp = codec2_samples_per_frame(c2);
+    nsamp_x2 = nsamp * 2;
+
+    _microphone_init();
+    _speaker_init(nsamp_x2 * 2);
+
+    for (unsigned n = 0; n < FRAME_LATENCY; n++) {
+        unsigned mi = nsamp_x2;
+
+        while (mic_ready == MIC_RDY_NONE)
+            asm("nop");
+
+        if (mic_ready == MIC_RDY_LOWER)
+            mi = 0;
+        else if (mic_ready == MIC_RDY_UPPER)
+            mi = nsamp;
+
+        codec2_encode(c2, encoded_[n], &mic_buf[mi]);
+        mic_ready = MIC_RDY_NONE;
+    }
+    efidx = 0;
 
 
 	while (1)
@@ -211,7 +221,27 @@ int main(void)
 			downTicker = 10;
 
             if (theByte == '.') {
-                vcp_printf("micSampCnt:%u\r\n", micSampCnt);
+                vcp_printf("CODEC2_MODE_");
+#if (CODEC2_MODE == CODEC2_MODE_3200)
+                vcp_printf("3200");
+#elif (CODEC2_MODE == CODEC2_MODE_2400)
+                vcp_printf("2400");
+#elif (CODEC2_MODE == CODEC2_MODE_1600)
+                vcp_printf("1600");
+#elif (CODEC2_MODE == CODEC2_MODE_1400)
+                vcp_printf("1400");
+#elif (CODEC2_MODE == CODEC2_MODE_1300)
+                vcp_printf("1300");
+#elif (CODEC2_MODE == CODEC2_MODE_1200)
+                vcp_printf("1200");
+#elif (CODEC2_MODE == CODEC2_MODE_700C)
+                vcp_printf("700C");
+#elif (CODEC2_MODE == CODEC2_MODE_450)
+                vcp_printf("450");
+#else
+                #error CODEC2_MODE
+#endif
+                vcp_printf(" micSampCnt:%u nsamp:%u\r\n", micSampCnt, nsamp);
                 vcp_printf("_waveType:%u\r\n", _waveType);
             }
             else if (theByte == '?') {
@@ -263,23 +293,15 @@ int main(void)
 		}
 
 #if 0
-        if (codec2_fifo_read(mic_fifo, fifo_buffer, 160) == 0) {
-            /*uint8_t encoded[9];
-            codec2_encode(c2, encoded, fifo_buffer);
-            codec2_decode(c2, fifo_buffer, encoded);*/
-            codec2_fifo_write(spkr_fifo, fifo_buffer, 160);
-        }
-#endif /* if 0 */
-
 		if (decoded_ready && fill_spkr != SPKR_NONE) {
 			unsigned i, si;
             if (fill_spkr == SPKR_LOWER)
                 si = 0;
             else if (fill_spkr == SPKR_UPPER)
-                si = 320;
+                si = nsamp_x2;
 
-			vcp_printf("spkr%u\r\n", si);
-            for (i = 0; i < 160; i++) {
+			//vcp_printf("spkr%u\r\n", si);
+            for (i = 0; i < nsamp; i++) {
                 spkr_buffer[si++] = decoded[i];    // left
                 spkr_buffer[si++] = decoded[i];    // right
             }
@@ -287,29 +309,60 @@ int main(void)
 			decoded_ready = 0;
             fill_spkr = SPKR_NONE;
 		}
+#endif /* if 0 */
 
-        if (decoded_ready == 0 && mic_ready != MIC_RDY_NONE) {
-            int mi;
+        if (/*decoded_ready == 0 &&*/ mic_ready != MIC_RDY_NONE) {
+            int mi = nsamp_x2;
             if (mic_ready == MIC_RDY_LOWER) {
                 //vcp_printf("MIC_RDY_LOWER\r\n");
-                mi = 0; // 0 to 159
+                mi = 0;
             } else if (mic_ready == MIC_RDY_UPPER) {
                 //vcp_printf("MIC_RDY_UPPER\r\n");
-                mi = 160; // 160 to 319
+                mi = nsamp;
             }
 
             GPIO_SetBits(GPIOC, GPIO_Pin_5);
-            codec2_encode(c2, encoded, &mic_buf[mi]);
-            codec2_decode(c2, decoded, encoded);
+            codec2_encode(c2, encoded_[efidx], &mic_buf[mi]);
             GPIO_ResetBits(GPIOC, GPIO_Pin_5);
-			decoded_ready = 1;
+            if (++efidx == FRAME_LATENCY)
+                efidx = 0;
+            encoded_rdy = 1;
+			//decoded_ready = 1;
 
-            vcp_printf("micRdy%u\r\n", mi);
+            //vcp_printf("micRdy%u\r\n", mi);
             mic_ready = MIC_RDY_NONE;
         } // ..if (decoded_ready == 0  && mic_ready != MIC_RDY_NONE)
 
+        if (encoded_rdy) {
+            unsigned idx = efidx + 1;
+			unsigned i, si = UINT_MAX;
+
+            if (idx == FRAME_LATENCY)
+                idx = 0;
+
+            GPIO_SetBits(GPIOE, GPIO_Pin_7);
+            codec2_decode(c2, decoded, encoded_[idx]);
+            GPIO_ResetBits(GPIOE, GPIO_Pin_7);
+            encoded_rdy = 0;
+
+            while (fill_spkr == SPKR_NONE)
+                asm("nop");
+            if (fill_spkr == SPKR_LOWER)
+                si = 0;
+            else if (fill_spkr == SPKR_UPPER)
+                si = nsamp_x2;
+
+			//vcp_printf("spkr%u\r\n", si);
+            for (i = 0; i < nsamp; i++) {
+                spkr_buffer[si++] = decoded[i];    // left
+                spkr_buffer[si++] = decoded[i];    // right
+            }
+
+            fill_spkr = SPKR_NONE;
+        }
+
         if (micOverrun) {
-            vcp_printf("micOverrun\r\n");
+            //vcp_printf("micOverrun\r\n");
             micOverrun = 0;
         }
 

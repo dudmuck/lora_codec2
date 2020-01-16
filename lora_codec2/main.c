@@ -39,12 +39,6 @@ uint8_t currently_decoding;
 struct CODEC2 *c2;
 unsigned nsamp; // 160 or 320, avoiding 450pwb for now
 unsigned nsamp_x2;  // 320 or 640, avoiding 450pwb for now
-#if 0
-unsigned c2_nsamp; // 160 or 320, avoiding 450pwb for now
-unsigned c2_nsamp_x2;  // 320 or 640, avoiding 450pwb for now
-unsigned audio_nsamp;
-unsigned audio_nsamp_x2;
-#endif /* if 0 */
 uint8_t _bytes_per_frame;
 uint8_t frame_length_bytes;
 
@@ -78,7 +72,6 @@ uint8_t get_pn9_byte()
 
 char str[512];
 
-//extern uint32_t APP_Rx_ptr_in;
 void vcp_printf( const char* format, ... )
 {
 #if ENABLE_VCP_PRINT
@@ -242,8 +235,11 @@ void app_gpio_init()
 
 void rxDoneCB(uint8_t size, float rssi, float snr)
 {
-    //vcp_printf("rxDone %ubytes %ddBm(x10) %ddB(x10)\r\n", size, (int)(rssi*10), (int)(snr*10));
-    vcp_printf("rxDone %ubytes %fdBm %fdB\r\n", size, (double)rssi, (double)snr);
+    vcp_printf("rxDone %ubytes %fdBm %fdB", size, (double)rssi, (double)snr);
+    if (_ticker > terminate_spkr_at_tick) {
+        vcp_printf(" (%ums since last tx end)", _ticker - terminate_spkr_at_tick );
+    }
+    vcp_printf("\r\n");
     rx_size = size;
     rx_rssi = rssi;
     rx_snr = snr;
@@ -307,15 +303,15 @@ void silence(spkr_e tone_at)
         asm("nop");
     si = start_a;
     for (unsigned i = 0; i < nsamp; i++) {
-        spkr_buffer[si++] = 0;//x8000;    // left
-        spkr_buffer[si++] = 0;//x8000;    // right
+        spkr_buffer[si++] = 0;    // left
+        spkr_buffer[si++] = 0;    // right
     }
     while (fill_spkr != b)
         asm("nop");
     si = start_b;
     for (unsigned i = 0; i < nsamp; i++) {
-        spkr_buffer[si++] = 0;//x8000;    // left
-        spkr_buffer[si++] = 0;//x8000;    // right
+        spkr_buffer[si++] = 0;    // left
+        spkr_buffer[si++] = 0;    // right
     }
 }
 
@@ -384,7 +380,7 @@ void parse_rx()
         currently_decoding = 1;
     } else {
         uint32_t since_last_decode_end = _ticker - tick_at_decode_end;
-        vcp_printf("since %u\r\n", since_last_decode_end);
+        vcp_printf("since %u\r\n", since_last_decode_end);  // adjust INTER_PKT_TIMEOUT according to this value
         terminate_spkr_at_tick = 0; // cancel spkr-terminate, another pkt received
     }
 
@@ -458,7 +454,7 @@ void parse_rx()
         scratch[1] = SX126x_rx_buf[n++];         // n=1 { 8, 9,10,11,12,13,14,15}
         scratch[2] = SX126x_rx_buf[n] & 0xc0;    // n=2 {16,17}
         if (n >= rx_size) {
-            vcp_printf("cutoff\r\n");
+            vcp_printf("cutoffA\r\n");
             break;
         }
         vcp_printf("A) %02x %02x %02x\r\n", scratch[0], scratch[1], scratch[2]);
@@ -478,7 +474,7 @@ void parse_rx()
         o <<= 2;
         scratch[2] = o;
         if (n >= rx_size) {
-            vcp_printf("cutoff\r\n");
+            vcp_printf("cutoffB\r\n");
             break;
         }
         vcp_printf("B) %02x %02x %02x\r\n", scratch[0], scratch[1], scratch[2]);
@@ -500,7 +496,7 @@ void parse_rx()
         o <<= 4;
         scratch[2] = o;
         if (n >= rx_size) {
-            vcp_printf("cutoff\r\n");
+            vcp_printf("cutoffC\r\n");
             break;
         }
         vcp_printf("C) %02x %02x %02x\r\n", scratch[0], scratch[1], scratch[2]);
@@ -519,10 +515,10 @@ void parse_rx()
         scratch[1] |= o;
         scratch[2] = SX126x_rx_buf[n++] & 0x03;  // n=8 {16,17}
         scratch[2] <<= 6;
-        if (n >= rx_size) {
-            vcp_printf("cutoff\r\n");
+        /*if (n >= rx_size) {
+            vcp_printf("cutoffD\r\n");
             break;
-        }
+        }*/
         vcp_printf("D) %02x %02x %02x\r\nrx_in:", scratch[0], scratch[1], scratch[2]);
         codec2_decode(c2, decoded_, scratch);
         put_spkr(decoded_);
@@ -559,13 +555,6 @@ void lora_rx_begin()
     GPIO_WriteBit(GPIOD, GPIO_Pin_14, Bit_RESET);  // red off
 }
 
-/*void print_buf(const uint8_t* buf, uint8_t len)
-{
-    unsigned i;
-    for (i = 0; i < len; i++)
-        vcp_printf("%02x ", buf[i]);
-    vcp_printf("\r\n");
-}*/
 
 volatile uint8_t idx_start; // tmp dbg
 uint8_t encode_once = 0;
@@ -580,18 +569,13 @@ int main(void)
 #if ((CODEC2_MODE == CODEC2_MODE_1300) || (CODEC2_MODE == CODEC2_MODE_700C) || (CODEC2_MODE == CODEC2_MODE_450))
     uint8_t scratch[8];
     uint8_t mid = 0;
-    /*#if (CODEC2_MODE == CODEC2_MODE_450)
-    uint64_t frame32H, frame32L;
-    #endif*/
 #endif
     unsigned prev_mic_samps = 0;
     unsigned prev_mic_frames = 0;
     uint32_t cpy_ticker = _ticker;
+
   	/* Set up the system clocks */
 	SystemInit();
-
-	/* Initialize USB, IO, SysTick, and all those other things you do in the morning */
-	//init();
 
 	c2 = codec2_create(CODEC2_MODE);
     if (c2 == NULL) {
@@ -632,9 +616,6 @@ int main(void)
         asm("nop");
     } else {
         lora_rx_begin();
-        /*Radio_Rx(0);
-        GPIO_WriteBit(GPIOD, GPIO_Pin_14, Bit_RESET);  // red off
-        */
         currently_decoding = 0;
     }
 
@@ -708,6 +689,8 @@ int main(void)
                 vcp_printf("700C");
 #elif (CODEC2_MODE == CODEC2_MODE_450)
                 vcp_printf("450");
+#else
+                #error CODEC2_MODE
 #endif
                 vcp_printf(" %ubits-per-frame\tbytes_per_frame:%u payLen:%u\r\n", codec2_bits_per_frame(c2), _bytes_per_frame, LORA_PAYLOAD_LENGTH);
 
@@ -775,7 +758,6 @@ int main(void)
             else if (fill_spkr == SPKR_UPPER)
                 si = nsamp_x2;
 
-			//vcp_printf("spkr%u\r\n", si);
             for (i = 0; i < nsamp; i++) {
                 spkr_buffer[si++] = decoded[i];    // left
                 spkr_buffer[si++] = decoded[i];    // right
@@ -788,10 +770,8 @@ int main(void)
         if (decoded_ready == 0 && mic_ready != MIC_RDY_NONE) {
             int mi;
             if (mic_ready == MIC_RDY_LOWER) {
-                //vcp_printf("MIC_RDY_LOWER\r\n");
                 mi = 0; // 0 to 159
             } else if (mic_ready == MIC_RDY_UPPER) {
-                //vcp_printf("MIC_RDY_UPPER\r\n");
                 mi = nsamp; // 160 to 319
             }
 
@@ -801,12 +781,10 @@ int main(void)
             GPIO_ResetBits(GPIOC, GPIO_Pin_5);
 			decoded_ready = 1;
 
-            //vcp_printf("micRdy%u\r\n", mi);
             mic_ready = MIC_RDY_NONE;
         } // ..if (decoded_ready == 0  && mic_ready != MIC_RDY_NONE)
 
         if (micOverrun) {
-            //vcp_printf("micOverrun\r\n");
             micOverrun = 0;
         }
 #else   /* walkie-talkie mode: */
@@ -818,7 +796,7 @@ int main(void)
                     vcp_printf("keyup ");
                     Radio_Standby();
                     user_button_pressed = 1;
-#if ((CODEC2_MODE == CODEC2_MODE_1300) || (CODEC2_MODE == CODEC2_MODE_700C))
+#if ((CODEC2_MODE == CODEC2_MODE_1300) || (CODEC2_MODE == CODEC2_MODE_700C) || (CODEC2_MODE == CODEC2_MODE_450))
                     mid = 0;
 #endif
                 }
@@ -962,7 +940,7 @@ int main(void)
                         vcp_printf("tx");
                         // send radio packet here
                         tx_encoded();
-#if ((CODEC2_MODE == CODEC2_MODE_1300) || (CODEC2_MODE == CODEC2_MODE_700C))
+#if ((CODEC2_MODE == CODEC2_MODE_1300) || (CODEC2_MODE == CODEC2_MODE_700C) || (CODEC2_MODE == CODEC2_MODE_450))
                         mid = 0;
 #endif
                     }

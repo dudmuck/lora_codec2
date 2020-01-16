@@ -140,21 +140,20 @@ const uint16_t sine_table[SINE_TABLE_LENGTH] =
     0x7a7f,0x7b48,0x7c11,0x7cdb,0x7da4,0x7e6d,0x7f36,0x8000
 };
 
-int16_t spkr_buffer[SPKR_BUFFER_SIZE];
+int16_t spkr_buffer[MAX_SPKR_BUFFER_SIZE];
 spkr_e fill_spkr;
 
-void _speaker_init()
+void _speaker_init(unsigned nsamp_x4)
 {
     /* Initialize I2S interface */  
     EVAL_AUDIO_SetAudioInterface(AUDIO_INTERFACE_I2S);
   
     vol = SPEAKER_VOLUME;
     /* Initialize the Audio codec and all related peripherals (I2S, I2C, IOExpander, IOs...) */  
-    //EVAL_AUDIO_Init(OUTPUT_DEVICE_HEADPHONE, SPEAKER_VOLUME, 32000);
-    EVAL_AUDIO_Init(OUTPUT_DEVICE_HEADPHONE, vol, 4000);
+    EVAL_AUDIO_Init(OUTPUT_DEVICE_HEADPHONE, vol, 8000);
 
     fill_spkr = SPKR_NONE;
-    EVAL_AUDIO_Play((uint16_t *)spkr_buffer, SPKR_BUFFER_SIZE * 8); // Only stereo is supported*/
+    EVAL_AUDIO_Play((uint16_t *)spkr_buffer, nsamp_x4 * 8); // Only stereo is supported*/
     
     vcp_printf("spkrInit\r\n");
 }
@@ -166,75 +165,10 @@ volatile uint8_t rshift;
 volatile unsigned skip;
 volatile uint8_t _waveType;
 
-/*void ramp_gen(unsigned *np)
-{
-    static unsigned short ramp = 0;
-    short sample;
-    unsigned n = *np;
-
-    sample = (ramp >> rshift) - 0x8000;
-    ramp += (skip+1);
-
-    audio_buffer[n++] = sample;    // left
-    audio_buffer[n++] = sample;    // right
-
-    *np = n;
-}*/
-
-/*void sine_gen(unsigned *np)
-{
-    short sample;
-    static unsigned table_idx = 0;
-    unsigned n = *np;
-
-    sample = (sine_table[table_idx] >> rshift) - 0x8000;
-    if (++table_idx == SINE_TABLE_LENGTH)
-        table_idx = 0;
-
-    if (skip > 0) {
-        unsigned foo;
-        for (foo = 0; foo < skip; foo++) {
-            if (++table_idx == SINE_TABLE_LENGTH)
-                table_idx = 0;
-        }
-    }
-
-    audio_buffer[n++] = sample;    // left
-    audio_buffer[n++] = sample;    // right
-
-    *np = n;
-}*/
-
-#if 0
-static inline void fill(uint8_t upper)
-{
-    int16_t buf[160];
-    //unsigned n;
-    if (codec2_fifo_read(spkr_fifo, buf, 160) == 0) {
-        unsigned n, i;
-        if (upper)
-            i = 160;
-        else
-            i = 0;
-
-        for (n = 0; n < 160; n++) {
-            _buffer[i++] = buf[n];   // left
-            _buffer[i++] = buf[n];   // right
-        }
-    } else {
-        if (upper)
-            memset(&_buffer[160], 0, 320);
-        else
-            memset(_buffer, 0, 320);
-    }
-}
-#endif /* if 0 */
-
 void EVAL_AUDIO_TransferComplete_CallBack(uint32_t pBuffer, uint32_t Size)
 {
     /* upper half of buffer was just completed */
     GPIO_ToggleBits(GPIOC, GPIO_Pin_1);
-    //fill(1);
     fill_spkr = SPKR_UPPER; // will be playing lower half: software to fill upper half
 }
 
@@ -242,7 +176,6 @@ void EVAL_AUDIO_HalfTransfer_CallBack(uint32_t pBuffer, uint32_t Size)
 {
     /* lower half of buffer was just completed */
     GPIO_ToggleBits(GPIOC, GPIO_Pin_2);
-    //fill(0);
     fill_spkr = SPKR_LOWER; // will be playing upper half: software to fill lower half
 }
 

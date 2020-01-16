@@ -45,7 +45,8 @@ struct pdm_fir_filter filter;
 __IO uint32_t Data_Status =0;
 
 volatile unsigned mic_buf_idx;
-short mic_buf[320];
+//short mic_buf[320];
+short mic_buf[1280];
 mic_e mic_ready;
 volatile uint8_t micOverrun;
 
@@ -224,16 +225,12 @@ uint8_t WaveRecorderStart(/*uint16_t* pbuf*/)
 /* Check if the interface has already been initialized */
   if (AudioRecInited)
   {
-    /* Store the location and size of the audio buffer */
-    //pAudioRecBuf = pbuf;
-    
 #ifndef MICROPHONE_USE_DMA
     /* Enable the Rx buffer not empty interrupt */
     SPI_I2S_ITConfig(SPI2, SPI_I2S_IT_RXNE, ENABLE);
     /* The Data transfer is performed in the SPI interrupt routine */
     /* Enable the SPI peripheral */
 #else
-    //DMA_Cmd(MICROPHONE_I2S_DMA_TX_STREAM, ENABLE);
     DMA_Cmd(MICROPHONE_I2S_DMA_RX_STREAM, ENABLE);
 #endif
     I2S_Cmd(SPI2, ENABLE); 
@@ -251,7 +248,7 @@ uint8_t WaveRecorderStart(/*uint16_t* pbuf*/)
 void _microphone_init()
 {
     mic_ready = MIC_RDY_NONE;
-    WaveRecorderInit(32000, 16, 1);
+    WaveRecorderInit(64000, 16, 1);
 
     WaveRecorderStart(/*audio_buffer*/);
 }
@@ -295,9 +292,9 @@ void Mic_DMA_I2S_RX_IRQHandler()
         }
 
         mic_buf[mic_buf_idx++] = out;
-        if (mic_buf_idx == 160)
+        if (mic_buf_idx == nsamp)
             mic_ready = MIC_RDY_LOWER;
-        else if (mic_buf_idx == 320) {
+        else if (mic_buf_idx == nsamp_x2) {
             mic_ready = MIC_RDY_UPPER;
             mic_buf_idx = 0;
         }
@@ -309,19 +306,10 @@ volatile unsigned micSampCnt;
 volatile unsigned micPutCnt;
 float micGain;
 
-//#define CNT_TEST        16
-/* PDM buffer input size */
-#define INTERNAL_BUFF_SIZE      64
-
-#define NNN     8
-
 volatile unsigned mic_abi = 0;
 
 #ifdef MICROPHONE_USE_DMA
 #endif /* MICROPHONE_USE_DMA */
-
-#ifndef MICROPHONE_USE_DMA
-#endif /* !MICROPHONE_USE_DMA */
 
 #ifndef MICROPHONE_USE_DMA
 /**

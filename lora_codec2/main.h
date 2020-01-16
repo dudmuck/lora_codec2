@@ -12,34 +12,42 @@
 #if (CODEC2_MODE == CODEC2_MODE_3200)
     #define LORA_PAYLOAD_LENGTH        128
     #define SF_AT_500KHZ            10
+    #define INTER_PKT_TIMEOUT               40
 #elif (CODEC2_MODE == CODEC2_MODE_2400)
     #define LORA_PAYLOAD_LENGTH        96
     #define SF_AT_500KHZ            10
+    #define INTER_PKT_TIMEOUT               40
 #elif (CODEC2_MODE == CODEC2_MODE_1600)
     #define LORA_PAYLOAD_LENGTH        128
     #define SF_AT_500KHZ            11
+    #define INTER_PKT_TIMEOUT               40
 #elif (CODEC2_MODE == CODEC2_MODE_1400)
     #define LORA_PAYLOAD_LENGTH        112
     #define SF_AT_500KHZ            11
+    #define INTER_PKT_TIMEOUT               40
 #elif (CODEC2_MODE == CODEC2_MODE_1300)
     #define LORA_PAYLOAD_LENGTH         52  /* 8 c2 frames per packet */
     #define SF_AT_500KHZ            11
+    #define INTER_PKT_TIMEOUT               40
 #elif (CODEC2_MODE == CODEC2_MODE_1200)
     #define LORA_PAYLOAD_LENGTH         96
     //#define LORA_PAYLOAD_LENGTH         192 /* 1281ms per packet */
     #define SF_AT_500KHZ            11
+    #define INTER_PKT_TIMEOUT               40
 #elif (CODEC2_MODE == CODEC2_MODE_700C)
     #define LORA_PAYLOAD_LENGTH         56  /* 16 c2 frames per packet */
     #define SF_AT_500KHZ            12
     #if (LORA_BW_KHZ == 500)
         #error unreliable_at_500KHz
     #endif
+    #define INTER_PKT_TIMEOUT               40
 #elif (CODEC2_MODE == CODEC2_MODE_450)  /* 360 samples per frame, 18 bits per frame */
     #define LORA_PAYLOAD_LENGTH         36  /* 16 c2 frames per packet */
     #define SF_AT_500KHZ            12
     #if (LORA_BW_KHZ == 500)
         #error unreliable_at_500KHz
     #endif
+    #define INTER_PKT_TIMEOUT               70
 #endif
 
 #if (LORA_BW_KHZ == 500)
@@ -54,7 +62,6 @@
     #define SPREADING_FACTOR    (SF_AT_500KHZ-4)
 #endif
 
-#define INTER_PKT_TIMEOUT               40 /* from observation of tick_at_decode_end  */
 /* Exported types ------------------------------------------------------------*/
 typedef enum {
     SPKR_NONE = 0,
