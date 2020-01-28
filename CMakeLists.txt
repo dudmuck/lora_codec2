@@ -321,7 +321,15 @@ set(CODEC2_SX1262_SRCS
 
 
 add_mapped_executable(lora_codec2 ${CODEC2_SX1262_SRCS} ${SYSTEM_SRCS})
+
+# frequency hopping option:
+#target_compile_definitions(lora_codec2 PRIVATE -DFHSS_BASE_FREQ=917200000)
+#target_compile_definitions(lora_codec2 PRIVATE -DFHSS_STEP_FREQ=200000)
+#target_compile_definitions(lora_codec2 PRIVATE -DFHSS_NUM_CHANNELS=4)
+
+
 target_compile_definitions(lora_codec2 PRIVATE -DIS_SX1262=1)
+# if VCP enabled, then serial terminal must be running on host
 #target_compile_definitions(lora_codec2 PRIVATE -DENABLE_VCP_PRINT)
 target_compile_definitions(lora_codec2 PRIVATE -DLORA_BW_KHZ=500)
 #target_compile_definitions(lora_codec2 PRIVATE -DLORA_BW_KHZ=250)

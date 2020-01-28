@@ -62,6 +62,8 @@
     #define SPREADING_FACTOR    (SF_AT_500KHZ-4)
 #endif
 
+#define USER_BUTTON                           GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_0)
+
 /* Exported types ------------------------------------------------------------*/
 typedef enum {
     SPKR_NONE = 0,
@@ -97,7 +99,12 @@ extern volatile uint32_t dbg_tick_at_send;
 extern volatile uint32_t call_tx_encoded_at_tick;
 extern volatile uint8_t to_rx_at_txdone;    // flag
 extern volatile uint8_t _sched_tx_encoded;  // flag
+extern volatile uint8_t need_fhss_lfsr;   // flag
 extern volatile uint8_t tx_buf_idx;
+#ifdef FHSS_BASE_FREQ
+void fhss_set_next_channel(const char*);
+#endif /* FHSS_BASE_FREQ */
+
 
 extern unsigned nsamp;
 extern unsigned nsamp_x2;

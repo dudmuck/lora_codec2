@@ -27,6 +27,7 @@ volatile uint8_t _sched_tx_encoded;  // flag
 volatile uint8_t to_rx_at_txdone;   // flag
 volatile uint8_t led_hi;   // flag
 volatile uint8_t terminate_spkr_rx;   // flag
+volatile uint8_t need_fhss_lfsr;   // flag
 
 volatile uint8_t usb_connected;
 volatile uint8_t usb_suspended;
@@ -42,6 +43,11 @@ unsigned nsamp_x2;  // 320 or 640, avoiding 450pwb for now
 uint8_t _bytes_per_frame;
 uint8_t frame_length_bytes;
 
+#ifdef FHSS_BASE_FREQ
+uint8_t fhss_current_channel;
+unsigned fhss_lfsr;
+#endif /* FHSS_BASE_FREQ */
+
 /*
  * The USB data must be 4 byte aligned if DMA is enabled. This macro handles
  * the alignment, if necessary (it's actually magic, but don't tell anyone).
@@ -50,21 +56,23 @@ __ALIGN_BEGIN USB_OTG_CORE_HANDLE  USB_OTG_dev __ALIGN_END;
 
 
 #define LFSR_INIT       0x1ff
-unsigned int lfsr = LFSR_INIT;
-uint8_t get_pn9_byte()
+unsigned noise_lfsr = LFSR_INIT;
+
+
+uint8_t get_pn9_byte(unsigned* lfsr)
 {
     uint8_t ret = 0;
     int xor_out;
 
-    xor_out = ((lfsr >> 5) & 0xf) ^ (lfsr & 0xf);   // four bits at a time
-    lfsr = (lfsr >> 4) | (xor_out << 5);    // four bits at a time
+    xor_out = ((*lfsr >> 5) & 0xf) ^ (*lfsr & 0xf);   // four bits at a time
+    *lfsr = (*lfsr >> 4) | (xor_out << 5);    // four bits at a time
 
-    ret |= (lfsr >> 5) & 0x0f;
+    ret |= (*lfsr >> 5) & 0x0f;
 
-    xor_out = ((lfsr >> 5) & 0xf) ^ (lfsr & 0xf);   // four bits at a time
-    lfsr = (lfsr >> 4) | (xor_out << 5);    // four bits at a time
+    xor_out = ((*lfsr >> 5) & 0xf) ^ (*lfsr & 0xf);   // four bits at a time
+    *lfsr = (*lfsr >> 4) | (xor_out << 5);    // four bits at a time
 
-    ret |= ((lfsr >> 1) & 0xf0);
+    ret |= ((*lfsr >> 1) & 0xf0);
 
     return ret;
 }
@@ -217,7 +225,6 @@ void set_test_pattern()
 }
 #endif /* LOOPBACK */
 
-#define USER_BUTTON                           GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_0)
 void app_gpio_init()
 {
     GPIO_InitTypeDef   GPIO_InitStructure;
@@ -264,9 +271,9 @@ spkr_e tone_out(uint8_t mask)
     for (unsigned i = 0; i < nsamp; i++) {
         short out;
         if (mask == 0xff) {
-            out = get_pn9_byte();   // noise
+            out = get_pn9_byte(&noise_lfsr);   // noise
             out <<= 8;
-            out += get_pn9_byte();   // noise
+            out += get_pn9_byte(&noise_lfsr);   // noise
             out &= 0x3fff;  // lower volume
         } else
             out = (cnt & mask) ? ampl: -ampl;
@@ -370,13 +377,42 @@ void put_spkr(const short* decoded)
     fill_spkr = SPKR_NONE;
 }
 
+spkr_e start_tone()
+{
+    return sine_out((rx_rssi+(rx_snr*4)) + 170);
+}
+
 void parse_rx()
 {
     short decoded_[640];
     unsigned n;
+
+#ifdef FHSS_BASE_FREQ
+    if (rx_size == 0) {
+        /* hopping sync request, reply with current lfsr */
+        SX126x_tx_buf[0] = fhss_lfsr >> 8;
+        SX126x_tx_buf[1] = fhss_lfsr & 0xff;
+        vcp_printf("send lfsr 0x%x\r\n", fhss_lfsr);
+        Radio_Send(2);
+        to_rx_at_txdone = 1;
+        return;
+    } else if (rx_size == 2) {
+        /* hopping sync reply, transmitter can start talking */
+        fhss_lfsr = SX126x_rx_buf[0];
+        fhss_lfsr <<= 8;
+        fhss_lfsr |= SX126x_rx_buf[1];
+        silence(start_tone());
+        need_fhss_lfsr = 0;
+        vcp_printf("got lfsr 0x%x\r\n", fhss_lfsr);
+        fhss_set_next_channel("GotLFSR");
+        return;
+    } else {
+        fhss_set_next_channel("rxHop");    // hopping on receiver side during voice transmission
+    }
+#endif /* FHSS_BASE_FREQ */
+
     if (currently_decoding == 0) {
-        /* start tone */
-        sine_out((rx_rssi+(rx_snr*4)) + 170);
+        start_tone();
         currently_decoding = 1;
     } else {
         uint32_t since_last_decode_end = _ticker - tick_at_decode_end;
@@ -515,17 +551,12 @@ void parse_rx()
         scratch[1] |= o;
         scratch[2] = SX126x_rx_buf[n++] & 0x03;  // n=8 {16,17}
         scratch[2] <<= 6;
-        /*if (n >= rx_size) {
-            vcp_printf("cutoffD\r\n");
-            break;
-        }*/
         vcp_printf("D) %02x %02x %02x\r\nrx_in:", scratch[0], scratch[1], scratch[2]);
         codec2_decode(c2, decoded_, scratch);
         put_spkr(decoded_);
     }
 #else
     for (n = 0; n < rx_size; n += _bytes_per_frame) {
-        unsigned i, si = INT_MAX;
         uint8_t *encoded = &SX126x_rx_buf[n];
         GPIO_ToggleBits(GPIOD, GPIO_Pin_15);    // blue toggle during decode (blocking mainloop here)
         codec2_decode(c2, decoded_, encoded);
@@ -548,9 +579,27 @@ void parse_rx()
     }
 }
 
+#ifdef FHSS_BASE_FREQ
+void fhss_set_next_channel(const char* from)
+{
+    unsigned hz;
+    uint8_t prev_ch = fhss_current_channel;
+    do {
+        fhss_current_channel = get_pn9_byte(&fhss_lfsr) % FHSS_NUM_CHANNELS;
+    } while (fhss_current_channel == prev_ch);
+
+    hz = FHSS_BASE_FREQ + (FHSS_STEP_FREQ * fhss_current_channel);
+    vcp_printf("\e[7mhop%s ch%u: %uhz\e[0m\r\n", from, fhss_current_channel, hz);
+    Radio_SetChannel(hz);
+}
+#endif /* FHSS_BASE_FREQ */
+
 /* start radio receive, and indicate as such */
 void lora_rx_begin()
 {
+#ifdef FHSS_BASE_FREQ
+    fhss_set_next_channel("rxStart");    // starting rx
+#endif /* FHSS_BASE_FREQ */
     Radio_Rx(0);
     GPIO_WriteBit(GPIOD, GPIO_Pin_14, Bit_RESET);  // red off
 }
@@ -610,6 +659,13 @@ int main(void)
     start_radio();
 
     app_gpio_init();
+
+#ifdef FHSS_BASE_FREQ
+    /* initialize hopping */
+    fhss_lfsr = LFSR_INIT;
+    fhss_current_channel = 0xff;
+    fhss_set_next_channel("init");    // initializing
+#endif /* FHSS_BASE_FREQ */
 
     if (USER_BUTTON) {
         /* ? transmitting on startup ? */
@@ -789,7 +845,6 @@ int main(void)
         }
 #else   /* walkie-talkie mode: */
         if (USER_BUTTON) {
-            unsigned i;
             if (_sched_tx_encoded == 0) {
                 if (txing == 0 && user_button_pressed == 0) {
                     /* rx -> tx mode switch */
@@ -799,155 +854,165 @@ int main(void)
 #if ((CODEC2_MODE == CODEC2_MODE_1300) || (CODEC2_MODE == CODEC2_MODE_700C) || (CODEC2_MODE == CODEC2_MODE_450))
                     mid = 0;
 #endif
+#ifdef FHSS_BASE_FREQ
+                    need_fhss_lfsr = 1;
+                    Radio_Send(0);
+#endif /* FHSS_BASE_FREQ */
                 }
-                /* TX mode */
-                if (mic_ready != MIC_RDY_NONE) {
-                    //unsigned i;
-                    int mi = nsamp_x2;
-                    if (mic_ready == MIC_RDY_LOWER)
-                        mi = 0;
-                    else if (mic_ready == MIC_RDY_UPPER)
-                        mi = nsamp;
+                if (need_fhss_lfsr == 0) {
+                    /* TX mode */
+#if ((CODEC2_MODE == CODEC2_MODE_1300) || (CODEC2_MODE == CODEC2_MODE_700C))
+                    unsigned i;
+#endif
+                    if (mic_ready != MIC_RDY_NONE) {
+                        //unsigned i;
+                        int mi = nsamp_x2;
+                        if (mic_ready == MIC_RDY_LOWER)
+                            mi = 0;
+                        else if (mic_ready == MIC_RDY_UPPER)
+                            mi = nsamp;
 
 #if ((CODEC2_MODE == CODEC2_MODE_1300) || (CODEC2_MODE == CODEC2_MODE_700C) || (CODEC2_MODE == CODEC2_MODE_450))
-                    if (tx_buf_idx == 0 && mid == 0) {
+                        if (tx_buf_idx == 0 && mid == 0)
 #else
-                    if (tx_buf_idx == 0) {
+                        if (tx_buf_idx == 0)
 #endif
-                        vcp_printf("(total:%u samps:%u, %uframes) ", _ticker - dbg_tick_start, micPutCnt - prev_mic_samps, micFrameCnt - prev_mic_frames);
-                        dbg_tick_start = _ticker;
-                        prev_mic_samps = micPutCnt;
-                        prev_mic_frames = micFrameCnt;
-                    }
+                        {
+                            vcp_printf("(total:%u samps:%u, %uframes) ", _ticker - dbg_tick_start, micPutCnt - prev_mic_samps, micFrameCnt - prev_mic_frames);
+                            dbg_tick_start = _ticker;
+                            prev_mic_samps = micPutCnt;
+                            prev_mic_frames = micFrameCnt;
+                        }
 
-                    vcp_printf("tx_buf_idx%u ", tx_buf_idx);
+                        vcp_printf("tx_buf_idx%u ", tx_buf_idx);
 #if ((CODEC2_MODE == CODEC2_MODE_1300) || (CODEC2_MODE == CODEC2_MODE_700C))
-                    if (mid) {
-                        unsigned oidx, iidx;
+                        if (mid) {
+                            unsigned oidx, iidx;
+                            codec2_encode(c2, scratch, &mic_buf[mi]);
+                            vcp_printf("B ");
+                            for (i = 0; i <= frame_length_bytes; i++) {
+                                vcp_printf("%02x ", scratch[i]);
+                            }
+                            vcp_printf("\r\n");
+                            oidx = frame_length_bytes;
+                            SX126x_tx_buf[tx_buf_idx+oidx] |= scratch[0] >> 4;
+                            oidx++;
+                            iidx = 0;
+                            for (i = 0; i <= frame_length_bytes; i++) {
+                                SX126x_tx_buf[tx_buf_idx+oidx] = scratch[iidx++] << 4;
+                                SX126x_tx_buf[tx_buf_idx+oidx] |= scratch[iidx] >> 4;
+                                oidx++;
+                            }
+
+                            vcp_printf("out ");
+                            for (i = 0; i < _bytes_per_frame; i++)
+                                vcp_printf("%02x ", SX126x_tx_buf[tx_buf_idx+i]);
+                            vcp_printf("\r\n");
+                            tx_buf_idx += _bytes_per_frame;
+                            mid = 0;
+                        /* ...second half */ } else { /* first half: */
+                            SX126x_tx_buf[tx_buf_idx+frame_length_bytes] = 0;
+                            codec2_encode(c2, &SX126x_tx_buf[tx_buf_idx], &mic_buf[mi]);
+                            vcp_printf("\r\nA ");
+                            for (i = 0; i <= frame_length_bytes; i++)
+                                vcp_printf("%02x ", SX126x_tx_buf[tx_buf_idx+i]);
+                            vcp_printf("\r\n");
+                            mid = 1;
+                        }
+#elif (CODEC2_MODE == CODEC2_MODE_450)
+                        uint8_t o;
                         codec2_encode(c2, scratch, &mic_buf[mi]);
-                        vcp_printf("B ");
-                        for (i = 0; i <= frame_length_bytes; i++) {
+                        vcp_printf("%c) ", 'A' + mid);
+                        for (unsigned i = 0; i <= frame_length_bytes; i++) {
                             vcp_printf("%02x ", scratch[i]);
                         }
                         vcp_printf("\r\n");
-                        oidx = frame_length_bytes;
-                        SX126x_tx_buf[tx_buf_idx+oidx] |= scratch[0] >> 4;
-                        oidx++;
-                        iidx = 0;
-                        for (i = 0; i <= frame_length_bytes; i++) {
-                            SX126x_tx_buf[tx_buf_idx+oidx] = scratch[iidx++] << 4;
-                            SX126x_tx_buf[tx_buf_idx+oidx] |= scratch[iidx] >> 4;
-                            oidx++;
+                        switch (mid) {  // {} = 18bit source
+                            case 0:
+                                idx_start = tx_buf_idx;
+                                SX126x_tx_buf[tx_buf_idx++] = scratch[0];   // n=0 {0, 1, 2, 3, 4, 5, 6, 7}
+                                SX126x_tx_buf[tx_buf_idx++] = scratch[1];   // n=1 {8, 9,10,11,12,13,14,15}
+                                SX126x_tx_buf[tx_buf_idx] = scratch[2];     // n=2 {16,17}
+                                mid = 1;
+                                break;
+                            case 1:
+                                o = scratch[0] & 0xfc;                      // n=2 {0,1,2,3,4,5}
+                                o >>= 2;
+                                SX126x_tx_buf[tx_buf_idx++] |= o;
+                                o = scratch[0] & 0x03;
+                                o <<= 6;
+                                SX126x_tx_buf[tx_buf_idx] = o;              // n=3 {6,7}
+                                o = scratch[1] & 0xfc;
+                                o >>= 2;
+                                SX126x_tx_buf[tx_buf_idx++] |= o;            // n=3 {8,9,10,11,12,13}
+                                o = scratch[1] & 0x03;                      // n=4 {14,15}
+                                o <<= 6;
+                                SX126x_tx_buf[tx_buf_idx] = o;
+                                o = scratch[2];
+                                o >>= 2;
+                                SX126x_tx_buf[tx_buf_idx] |= o;             // n=4 {16,17}
+                                mid = 2;
+                                break;
+                            case 2:
+                                o = scratch[0] & 0xf0;                      // n=4 {0,1,2,3}
+                                o >>= 4;
+                                SX126x_tx_buf[tx_buf_idx++] |= o;
+                                o = scratch[0] & 0x0f;                      // n=5 {4,5,6,7}
+                                o <<= 4;
+                                SX126x_tx_buf[tx_buf_idx] = o;
+                                o = scratch[1] & 0xf0;                      // n=5 {8,9,10,11}
+                                o >>= 4;
+                                SX126x_tx_buf[tx_buf_idx++] |= o;
+                                o = scratch[1] & 0x0f;                      // n=6 {12,13,14,15}
+                                o <<= 4;
+                                SX126x_tx_buf[tx_buf_idx] = o;
+                                o = scratch[2];                             // n=6 {16,17}
+                                o >>= 4;
+                                SX126x_tx_buf[tx_buf_idx] |= o;
+                                mid = 3;
+                                break;
+                            case 3:
+                                o = scratch[0] & 0xc0;                      // n=6 {0,1}
+                                o >>= 6;
+                                SX126x_tx_buf[tx_buf_idx++] |= o;
+                                o = scratch[0] & 0x3f;                      // n=7 {2,3,4,5,6,7}
+                                o <<= 2;
+                                SX126x_tx_buf[tx_buf_idx] = o;
+                                o = scratch[1] & 0xc0;                      // n=7 {8,9}
+                                o >>= 6;
+                                SX126x_tx_buf[tx_buf_idx++] |= o;
+                                o = scratch[1] & 0x3f;                      // n=8 {10,11,12 13,14,15}
+                                o <<= 2;
+                                SX126x_tx_buf[tx_buf_idx] = o;
+                                o = scratch[2];                             // n=8 {16,17}
+                                o >>= 6;
+                                SX126x_tx_buf[tx_buf_idx++] |= o;
+                                vcp_printf("out:");
+                                for (unsigned n = idx_start; n < tx_buf_idx; n++) {
+                                    vcp_printf("%02x ", SX126x_tx_buf[n]);
+                                }
+                                vcp_printf("\r\n");
+                                mid = 0;
+                                break;
                         }
-
-                        vcp_printf("out ");
-                        for (i = 0; i < _bytes_per_frame; i++)
-                            vcp_printf("%02x ", SX126x_tx_buf[tx_buf_idx+i]);
-                        vcp_printf("\r\n");
-                        tx_buf_idx += _bytes_per_frame;
-                        mid = 0;
-                    /* ...second half */ } else { /* first half: */
-                        SX126x_tx_buf[tx_buf_idx+frame_length_bytes] = 0;
-                        codec2_encode(c2, &SX126x_tx_buf[tx_buf_idx], &mic_buf[mi]);
-                        vcp_printf("\r\nA ");
-                        for (i = 0; i <= frame_length_bytes; i++)
-                            vcp_printf("%02x ", SX126x_tx_buf[tx_buf_idx+i]);
-                        vcp_printf("\r\n");
-                        mid = 1;
-                    }
-#elif (CODEC2_MODE == CODEC2_MODE_450)
-                    uint8_t o;
-                    codec2_encode(c2, scratch, &mic_buf[mi]);
-                    vcp_printf("%c) ", 'A' + mid);
-                    for (i = 0; i <= frame_length_bytes; i++) {
-                        vcp_printf("%02x ", scratch[i]);
-                    }
-                    vcp_printf("\r\n");
-                    switch (mid) {  // {} = 18bit source
-                        case 0:
-                            idx_start = tx_buf_idx;
-                            SX126x_tx_buf[tx_buf_idx++] = scratch[0];   // n=0 {0, 1, 2, 3, 4, 5, 6, 7}
-                            SX126x_tx_buf[tx_buf_idx++] = scratch[1];   // n=1 {8, 9,10,11,12,13,14,15}
-                            SX126x_tx_buf[tx_buf_idx] = scratch[2];     // n=2 {16,17}
-                            mid = 1;
-                            break;
-                        case 1:
-                            o = scratch[0] & 0xfc;                      // n=2 {0,1,2,3,4,5}
-                            o >>= 2;
-                            SX126x_tx_buf[tx_buf_idx++] |= o;
-                            o = scratch[0] & 0x03;
-                            o <<= 6;
-                            SX126x_tx_buf[tx_buf_idx] = o;              // n=3 {6,7}
-                            o = scratch[1] & 0xfc;
-                            o >>= 2;
-                            SX126x_tx_buf[tx_buf_idx++] |= o;            // n=3 {8,9,10,11,12,13}
-                            o = scratch[1] & 0x03;                      // n=4 {14,15}
-                            o <<= 6;
-                            SX126x_tx_buf[tx_buf_idx] = o;
-                            o = scratch[2];
-                            o >>= 2;
-                            SX126x_tx_buf[tx_buf_idx] |= o;             // n=4 {16,17}
-                            mid = 2;
-                            break;
-                        case 2:
-                            o = scratch[0] & 0xf0;                      // n=4 {0,1,2,3}
-                            o >>= 4;
-                            SX126x_tx_buf[tx_buf_idx++] |= o;
-                            o = scratch[0] & 0x0f;                      // n=5 {4,5,6,7}
-                            o <<= 4;
-                            SX126x_tx_buf[tx_buf_idx] = o;
-                            o = scratch[1] & 0xf0;                      // n=5 {8,9,10,11}
-                            o >>= 4;
-                            SX126x_tx_buf[tx_buf_idx++] |= o;
-                            o = scratch[1] & 0x0f;                      // n=6 {12,13,14,15}
-                            o <<= 4;
-                            SX126x_tx_buf[tx_buf_idx] = o;
-                            o = scratch[2];                             // n=6 {16,17}
-                            o >>= 4;
-                            SX126x_tx_buf[tx_buf_idx] |= o;
-                            mid = 3;
-                            break;
-                        case 3:
-                            o = scratch[0] & 0xc0;                      // n=6 {0,1}
-                            o >>= 6;
-                            SX126x_tx_buf[tx_buf_idx++] |= o;
-                            o = scratch[0] & 0x3f;                      // n=7 {2,3,4,5,6,7}
-                            o <<= 2;
-                            SX126x_tx_buf[tx_buf_idx] = o;
-                            o = scratch[1] & 0xc0;                      // n=7 {8,9}
-                            o >>= 6;
-                            SX126x_tx_buf[tx_buf_idx++] |= o;
-                            o = scratch[1] & 0x3f;                      // n=8 {10,11,12 13,14,15}
-                            o <<= 2;
-                            SX126x_tx_buf[tx_buf_idx] = o;
-                            o = scratch[2];                             // n=8 {16,17}
-                            o >>= 6;
-                            SX126x_tx_buf[tx_buf_idx++] |= o;
-                            vcp_printf("out:");
-                            for (unsigned n = idx_start; n < tx_buf_idx; n++) {
-                                vcp_printf("%02x ", SX126x_tx_buf[n]);
-                            }
-                            vcp_printf("\r\n");
-                            mid = 0;
-                            break;
-                    }
 #else
-                    codec2_encode(c2, &SX126x_tx_buf[tx_buf_idx], &mic_buf[mi]);
-                    tx_buf_idx += _bytes_per_frame;
+                        codec2_encode(c2, &SX126x_tx_buf[tx_buf_idx], &mic_buf[mi]);
+                        tx_buf_idx += _bytes_per_frame;
 #endif
-                    vcp_printf("->%u ", tx_buf_idx);
-                    if (tx_buf_idx >= LORA_PAYLOAD_LENGTH) {
-                        vcp_printf("tx");
-                        // send radio packet here
-                        tx_encoded();
+                        vcp_printf("->%u ", tx_buf_idx);
+                        if (tx_buf_idx >= LORA_PAYLOAD_LENGTH) {
+                            vcp_printf("tx");
+                            // send radio packet here
+                            tx_encoded();
 #if ((CODEC2_MODE == CODEC2_MODE_1300) || (CODEC2_MODE == CODEC2_MODE_700C) || (CODEC2_MODE == CODEC2_MODE_450))
-                        mid = 0;
+                            mid = 0;
 #endif
-                    }
-                    vcp_printf("\r\n");
+                        }
+                        vcp_printf("\r\n");
 
-                    mic_ready = MIC_RDY_NONE;
-                }
+                        mic_ready = MIC_RDY_NONE;
+                    } // ..if (mic_ready != MIC_RDY_NONE)
+                } // ..if (need_fhss_lfsr == 0)
             } // ..if (_sched_tx_encoded == 0)
         } // ..if (USER_BUTTON)
         else {
@@ -966,9 +1031,6 @@ int main(void)
                     }
                 } else {
                     lora_rx_begin();
-                    /*Radio_Rx(0);
-                    GPIO_WriteBit(GPIOD, GPIO_Pin_14, Bit_RESET);  // red off
-                    */
                     currently_decoding = 0;
                 }
                 user_button_pressed = 0;
