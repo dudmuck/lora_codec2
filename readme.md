@@ -67,10 +67,8 @@ DIO1         |  PA2      |       P1-14          |     J1-6
 BUSY         |  PB1      |       P1-21          |     J1-4
 AntSwPwr     |  PB3      |       P2-28          |     J2-1
 Other modules could be also used, such as [dorji module](http://www.dorji.com/products-detail.php?ProId=63)
-```
 
-![wiring diagram](stm32f4discovery.png?raw=true "wiring diagram")
-```
+![wiring diagram](stm32f4discovery.png)
 
 ## implementation details
 DMA is used for microphone interface because PDM microphone operates at 16x the required sample rate.  In the case of codec2, 8Ksps is required, with the PDM microphone operating at 64ksps.  16 samples are collected using DMA, needing an interrupt only when at least 16 samples are ready to send to PDM filter.
