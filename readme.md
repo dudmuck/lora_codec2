@@ -20,15 +20,18 @@ $ cmake .. -DCMAKE_TOOLCHAIN_FILE=../codec2/stm32/cmake/STM32_Toolchain.cmake -D
 $ make
 ```
 
-Select codec2 bit-rate: uncomment the line in CMakeLists.txt:
+Select codec2 bit-rate: uncomment the line in ``CMakeLists.txt``:
 ``#target_compile_definitions(lora_codec2 PRIVATE -DCODEC2_MODE=CODEC2_MODE_<bitrate>)``
 Select desired LoRa bandwidth on the line defining ``LORA_BW_KHZ`` in CMakelists.txt.  Spreading factor will be selected appropriate for the vocoder bit-rate and LoRa bandwidth selected.  Spreading factor functional range is 5 to 12.  See file loRa_codec2/main.h where spreading factor is defined according to codec2 bitrate vs LoRa bandwidth.
+
+for execution logs, define ``ENABLE_VCP_PRINT`` in ``CMakeLists.txt``, however the micro-usb cable must be connected and a serial terminal program running on the PC to take the characters, or the program will halt waiting for characters to send on VCP.   Disable this feature when you do not wish to connect the micro-usb cable.
 
 Flashing stm32f4-discovery
 https://github.com/texane/stlink
 providing address isnt needed when using st-flash with .hex files
 i.e: 
-``st-flash --format ihex write lora_codec2.hex``
+``st-flash --format ihex write lora_codec2.hex``  
+Instead, you  may also simply copy the ``.bin`` file from the build to the USB flash drive thru the mini-B USB on the stm32f4-discovery.
 
 
 
@@ -64,6 +67,10 @@ DIO1         |  PA2      |       P1-14          |     J1-6
 BUSY         |  PB1      |       P1-21          |     J1-4
 AntSwPwr     |  PB3      |       P2-28          |     J2-1
 Other modules could be also used, such as [dorji module](http://www.dorji.com/products-detail.php?ProId=63)
+```
+
+![wiring diagram](stm32f4discovery.png?raw=true "wiring diagram")
+```
 
 ## implementation details
 DMA is used for microphone interface because PDM microphone operates at 16x the required sample rate.  In the case of codec2, 8Ksps is required, with the PDM microphone operating at 64ksps.  16 samples are collected using DMA, needing an interrupt only when at least 16 samples are ready to send to PDM filter.
